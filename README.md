@@ -1,4 +1,4 @@
-# Galaxy_Camera_Web
+# Autoaim 2026
 在Nvidia Jetson Orin Nano上，用Daheng Galaxy系列相机采集，使用yolov8进行推理并计算Yaw和Pitch角度，并可以在Web端监控
 ## 1.下载并安装驱动
 [Daheng官网下载中心](https://www.daheng-imaging.com/index.php?m=content&c=index&a=lists&catid=59&czxt=30&sylx=&syxj=#mmd)下载 **Galaxy Linux-armhf-Gige-U3 SDK_CN-EN** 和 **Galaxy Linux-Python SDK_CN-EN** 。  
