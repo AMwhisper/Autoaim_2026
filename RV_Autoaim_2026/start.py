@@ -21,26 +21,26 @@ def main():
     # ============================
     # 基础参数
     # ============================
-    parser.add_argument('--fps', type=float, default=120, help='Camera acquisition frame rate')
+    parser.add_argument('--fps', type=float, default=240, help='Camera acquisition frame rate')
     parser.add_argument('--port', type=int, default=5000, help='Web server port')
 
     # ============================
     # 摄像机基础参数
     # ============================
-    parser.add_argument('--exposure', type=float, default=8000, help='Exposure time (us)')
-    parser.add_argument('--gain', type=float, default=10.0, help='Camera gain')
+    parser.add_argument('--exposure', type=float, default=4000, help='Exposure time (us)')
+    parser.add_argument('--gain', type=float, default=8, help='Camera gain')
 
     # ============================
     # 图像增强参数
     # ============================
-    parser.add_argument('--contrast', type=int, default=0, help='Contrast [-50,100]')
+    parser.add_argument('--contrast', type=int, default=1.5, help='Contrast [-50,100]')
     parser.add_argument('--gamma', type=float, default=1.0, help='Gamma [0.1,10.0]')
-    parser.add_argument('--color_correction', type=int, default=0, help='Enable color correction (0 or 1)')
+    parser.add_argument('--color_correction', type=int, default=1, help='Enable color correction (0 or 1)')
 
     # ============================
     # 白平衡
     # ============================
-    parser.add_argument('--wb_r', type=float, default=1.0)
+    parser.add_argument('--wb_r', type=float, default=1.5)
     parser.add_argument('--wb_g', type=float, default=1.0)
     parser.add_argument('--wb_b', type=float, default=1.0)
 
@@ -66,7 +66,8 @@ def main():
     camera = GalaxyCamera(
         frame_rate=args.fps,
         # use_image_improvement=args.image_improvement,
-        logger=logger
+        logger=logger,
+        robot_color = args.robot_color
     )
 
     camera.start()
@@ -79,6 +80,7 @@ def main():
         camera.set_exposure(args.exposure)
         camera.set_gain(args.gain)
         camera.set_frame_rate(args.fps)
+        logger.log("INFO", "设置基础参数成功")
     except Exception as e:
         logger.log("Error", f"设置基础参数失败: {e}")
 

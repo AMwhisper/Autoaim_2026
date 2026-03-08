@@ -21,14 +21,20 @@ class Autoaim:
         self.robot_type = robot_type
         self.last_time = time.time()
         self.robot_color = robot_color
+        # 自动开火参数
+        self.fire_yaw_thresh = 5.0
+        self.fire_pitch_thresh = 5.0
+        self.fire_lock_frames = 5
+        self.lock_count = 0  
+        self.fire_command = 0  
         
         # 红蓝方敌人标签设置
         if self.robot_color.lower() == 'red':
             # 我们是红色，敌人是蓝色
-            self.enemy_labels = [1, 8]
+            self.enemy_labels = [1, 2, 3, 4, 5, 8]
         elif self.robot_color.lower() == 'blue':
             # 我们是蓝色，敌人是红色
-            self.enemy_labels = [10]
+            self.enemy_labels = [10, 11, 12, 13, 14]
         
         # 加载 YOLO 模型
         self.model = YOLO(model_path)
@@ -50,7 +56,6 @@ class Autoaim:
             [1., 0.],
             [0., 1.]
         ])
-  
         self.kf_yaw.F = np.array([
             [1., dt],
             [0., 1.]
@@ -82,19 +87,47 @@ class Autoaim:
             [1e-4, 0.],
             [0., 1e-4]
         ])
+        
+        # 卡尔曼预测
+        self.kf_target = KalmanFilter(dim_x=4, dim_z=2)
+        self.kf_target.x = np.array([0.,0.,0.,0.])
+        self.kf_target.F = np.array([
+            [1,0,1,0],
+            [0,1,0,1],
+            [0,0,1,0],
+            [0,0,0,1]
+        ])
 
+        self.kf_target.H = np.array([
+            [1,0,0,0],
+            [0,1,0,0]
+        ])
+
+        self.kf_target.P *= 10
+        self.kf_target.R *= 5
+        self.kf_target.Q *= 0.01
         # -----------------------
         # 启动 YOLO 推理线程
         # -----------------------
         self.running = True
-        self.thread = threading.Thread(target=self.capture_loop, daemon=True)
+        self.thread = threading.Thread(target=self.autoaim_loop, daemon=True)
         self.thread.start()
 
     # ============================
     # YOLO + solvePnP + 卡尔曼滤波循环
     # ============================
-    def capture_loop(self):
-
+    def autoaim_loop(self):
+        
+        # --- 1. 等待相机准备就绪 ---
+        print("等待相机首帧图像...")
+        frame = None
+        while frame is None and self.running:
+            frame = self.camera.get_frame()
+            if frame is None:
+                time.sleep(0.1)
+        
+        if not self.running: return
+        
         # 相机内参 (MER-230-168U3C)
         # fx, fy = 焦距像素, cx, cy = 图像中心
         h, w, _ = self.camera.get_frame().shape
@@ -112,7 +145,7 @@ class Autoaim:
         while self.running:
             frame = self.camera.get_frame()
             if frame is None:
-                time.sleep(0.01)
+              
                 continue
 
             results = self.model(frame, imgsz=640, verbose=False)
@@ -147,12 +180,36 @@ class Autoaim:
             if best_target is not None:
                 # print("No enemy target detected")
                 x1, y1, x2, y2 = best_target
-                # 图像坐标: 左上、右上、右下、左下
+                
+                # 目标中心
+                bx = (x1 + x2) / 2
+                by = (y1 + y2) / 2
+
+                # 卡尔曼预测更新
+                measurement = np.array([bx, by])
+
+                self.kf_target.predict()
+                self.kf_target.update(measurement)
+                
+               
+                    
+                
+                # 预测未来位置
+                pred_x = self.kf_target.x[0]
+                pred_y = self.kf_target.x[1]
+
+                # 画预测点（调试）
+                cv2.circle(annotated_frame,(int(pred_x),int(pred_y)),6,(0,0,255),-1)
+
+                # 用预测中心构造bbox
+                width = x2 - x1
+                height = y2 - y1
+
                 image_points = np.array([
-                    [x1, y1],
-                    [x2, y1],
-                    [x2, y2],
-                    [x1, y2]
+                    [pred_x-width/2, pred_y-height/2],
+                    [pred_x+width/2, pred_y-height/2],
+                    [pred_x+width/2, pred_y+height/2],
+                    [pred_x-width/2, pred_y+height/2]
                 ], dtype=np.float64)
 
                 # 装甲板实际尺寸 (mm)
@@ -200,24 +257,49 @@ class Autoaim:
                     self.kf_pitch.predict()
                     self.kf_pitch.update(pitch)
                     smooth_pitch = float(self.kf_pitch.x[0])
+                    
+                    # 计算误差
+                    yaw_error = smooth_yaw
+                    pitch_error = smooth_pitch
+                    
+                    # 自动开火条件判断（只有Sentry兵种生效）
+                    if self.robot_type.lower() == "sentry":
+                        if abs(yaw_error) < self.fire_yaw_thresh and abs(pitch_error) < self.fire_pitch_thresh:
+                            self.lock_count += 1
+                        else:
+                            self.lock_count = 0
 
-                    cv2.putText(annotated_frame, f"Yaw: {smooth_yaw:.1f} deg", (10,30),
+                        # 只要连续锁定目标的帧数超过一定值，就触发开火
+                        if self.lock_count > self.fire_lock_frames:
+                            self.fire_command = 1  # 开火
+                        else:
+                            self.fire_command = 0  # 不开火
+                    else:
+                        self.fire_command = 0  # 非sentry兵种不触发开火
+                        
+                    cv2.putText(annotated_frame, f"Yaw: {smooth_yaw:.1f} deg", (10,60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Pitch: {smooth_pitch:.1f} deg", (10,60),
+                    cv2.putText(annotated_frame, f"Pitch: {smooth_pitch:.1f} deg", (10,90),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Distance: {distance:.0f} mm", (10,90),
+                    cv2.putText(annotated_frame, f"Distance: {distance:.0f} mm", (10,120),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-            else:
-                cv2.putText(annotated_frame, f"Best target selected: {best_target}", (10,30),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                    cv2.putText(annotated_frame, f"Fire Command: {self.fire_command}", (10, 150),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
             
-            with self.lock:
-                self.latest_frame = annotated_frame
+            else:
+                cv2.putText(annotated_frame, f"Best target selected: {best_target}", (10,60),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+            self.update_web(annotated_frame)
+            
+    def update_web(self, frame):
+        with self.lock:
+            self.latest_frame = frame
                 
-            # 向web传递最新帧
-            if hasattr(self, 'web_server') and self.web_server is not None:
-                self.web_server.update_frame(annotated_frame)
+        # 向web传递最新帧
+        if hasattr(self, 'web_server') and self.web_server is not None:
+            self.web_server.update_frame(frame)
 
-            time.sleep(0.01)
+      
 
     

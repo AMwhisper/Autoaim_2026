@@ -2,12 +2,13 @@ import gxipy as gx
 import threading
 import time
 import sys
+import cv2
 from PIL import Image
 import numpy as np
 
 class GalaxyCamera:
 
-    def __init__(self, frame_rate=120, logger=None):
+    def __init__(self, frame_rate = 120, logger = None, robot_color = 'blue'):
         self.device_manager = gx.DeviceManager()
         self.cam = None
         self.latest_frame = None
@@ -15,11 +16,14 @@ class GalaxyCamera:
         self.frame_rate = frame_rate
         self.lock = threading.Lock()
         self.logger = logger
-
+  
         self.start_time = None
         self.frames_captured = 0
         self.last_fps_time = 0
-
+        
+        self.robot_color = robot_color
+        self.target_color = "red"
+        
         self.open_camera()
 
     # ==================================================
@@ -91,15 +95,18 @@ class GalaxyCamera:
             rgb_image = raw.convert("RGB")
             frame = rgb_image.get_numpy_array()
 
+            if frame is None:
+                continue
+
             # 线程安全缓存
             with self.lock:
-                self.latest_frame = frame
+                 self.latest_frame = frame # 原图
 
             # FPS统计
             self.frames_captured += 1
             now = time.time()
             if now - self.last_fps_time >= 1.0:
-                print(f"Camera FPS: {self.frames_captured}")
+                # print(f"Camera FPS: {self.frames_captured}")
                 self.frames_captured = 0
                 self.last_fps_time = now
 
@@ -153,3 +160,11 @@ class GalaxyCamera:
         self.cam.BalanceRatioSelector.set(gx.GxBalanceRatioSelectorEntry.BLUE)
         b = self.cam.BalanceRatio.get()
         return r, g, b
+    def set_target_color(self):
+        if self.robot_color == 'blue':
+            self.target_color = 'red'
+        elif self.robot_color == 'red':
+            self.target_color = 'blue'
+            
+                
+            
