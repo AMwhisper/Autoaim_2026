@@ -5,6 +5,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import argparse
 import time
 import threading
+import rclpy
+from rclpy.executors import SingleThreadedExecutor
+from RV_Autoaim_2026.publisher import NodePublisher
 from RV_Autoaim_2026.logger import Logger
 from RV_Autoaim_2026.camera import GalaxyCamera
 from RV_Autoaim_2026.autoaim import Autoaim
@@ -21,13 +24,13 @@ def main():
     # ============================
     # 基础参数
     # ============================
-    parser.add_argument('--fps', type=float, default=240, help='Camera acquisition frame rate')
+    parser.add_argument('--fps', type=float, default=120, help='Camera acquisition frame rate')
     parser.add_argument('--port', type=int, default=5000, help='Web server port')
 
     # ============================
     # 摄像机基础参数
     # ============================
-    parser.add_argument('--exposure', type=float, default=4000, help='Exposure time (us)')
+    parser.add_argument('--exposure', type=float, default=10000, help='Exposure time (us)')
     parser.add_argument('--gain', type=float, default=8, help='Camera gain')
 
     # ============================
@@ -139,6 +142,24 @@ def main():
         robot_type = args.robot_type, 
         robot_color = args.robot_color
     )
+    
+    # ============================
+    # 启动 ROS 2 Publisher
+    # ============================
+    rclpy.init()
+    # 将 autoaim 实例传入 Publisher
+    ros_publisher = NodePublisher(autoaim)
+    
+    # 为了不阻塞主线程，用一个线程来跑 ROS 2 的 spin
+    def ros_spin_thread():
+        executor = SingleThreadedExecutor()
+        executor.add_node(ros_publisher)
+        executor.spin()
+        
+    ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
+    ros_thread.start()
+    # logger.log("Main", "ROS 2 Publisher 节点已启动并进入后台循环")
+    
     # ============================
     # 启动 Web 服务
     # ============================

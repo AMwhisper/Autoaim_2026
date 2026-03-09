@@ -6,7 +6,7 @@
 ## 2.使用该包
 在根目录（setup.py在的目录）下执行
 ```
-pip install -e .
+python3 -m pip install -e .
 ```
 等待安装好后执行
 ```

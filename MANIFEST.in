@@ -1,1 +1,3 @@
-include galaxy_camera/best.pt
+include RV_Autoaim_2026/best.pt
+include RV_Autoaim_2026/best.onnx
+include RV_Autoaim_2026/best.engine

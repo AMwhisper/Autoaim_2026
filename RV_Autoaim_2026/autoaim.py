@@ -5,14 +5,15 @@ import threading
 import os
 import math
 import numpy as np
-from flask import Flask, Response, render_template_string
+import rclpy
+from flask import Flask
 from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 from RV_Autoaim_2026.ballistic_solver import BallisticSolver
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(base_dir, "best.pt")
-
+# model_path = os.path.join(base_dir, "best.pt")
+model_path = os.path.join(base_dir, "best.engine")
 class Autoaim:
     def __init__(self, camera, robot_type = 'hero', robot_color = 'blue' ):
         self.camera = camera
@@ -21,12 +22,14 @@ class Autoaim:
         self.robot_type = robot_type
         self.last_time = time.time()
         self.robot_color = robot_color
-        # 自动开火参数
-        self.fire_yaw_thresh = 5.0
-        self.fire_pitch_thresh = 5.0
+        # Autoaim参数
+        self.fire_yaw_thresh = 10.0
+        self.fire_pitch_thresh = 10.0
         self.fire_lock_frames = 5
         self.lock_count = 0  
-        self.fire_command = 0  
+        self.fire_command = 0 
+        self.smooth_yaw = 0.0
+        self.smooth_pitch = 0.0
         
         # 红蓝方敌人标签设置
         if self.robot_color.lower() == 'red':
@@ -37,10 +40,21 @@ class Autoaim:
             self.enemy_labels = [10, 11, 12, 13, 14]
         
         # 加载 YOLO 模型
-        self.model = YOLO(model_path)
+        self.model = YOLO(model_path, task='detect')
         self.latest_frame = None
         self.lock = threading.Lock()
-
+        
+        # 预热模型（防止第一帧由于内存分配卡顿）
+        # dummy_input = np.zeros((320, 320, 3), dtype=np.uint8)
+        # self.model(dummy_input, imgsz=320, verbose=False)
+        
+        # -----------------------
+        # 启动 YOLO 推理线程
+        # -----------------------
+        self.running = True
+        self.thread = threading.Thread(target=self.autoaim_loop, daemon=True)
+        self.thread.start()
+        
         # -----------------------
         # 初始化卡尔曼滤波器
         # -----------------------
@@ -106,12 +120,7 @@ class Autoaim:
         self.kf_target.P *= 10
         self.kf_target.R *= 5
         self.kf_target.Q *= 0.01
-        # -----------------------
-        # 启动 YOLO 推理线程
-        # -----------------------
-        self.running = True
-        self.thread = threading.Thread(target=self.autoaim_loop, daemon=True)
-        self.thread.start()
+        
 
     # ============================
     # YOLO + solvePnP + 卡尔曼滤波循环
@@ -148,9 +157,16 @@ class Autoaim:
               
                 continue
 
-            results = self.model(frame, imgsz=640, verbose=False)
+            # results = self.model(frame, imgsz=640, verbose=False)
+            results = self.model(
+                frame, 
+                imgsz=640,      
+                stream=False,    
+                half=True,      
+                device=0,       
+                verbose=True
+            )
             annotated_frame = results[0].plot()
-            
             boxes = results[0].boxes.xyxy.cpu().numpy()
             best_target = None
             min_center_dist = float('inf')
@@ -176,7 +192,7 @@ class Autoaim:
                 if center_dist < min_center_dist:
                     min_center_dist = center_dist
                     best_target = det
-
+    
             if best_target is not None:
                 # print("No enemy target detected")
                 x1, y1, x2, y2 = best_target
@@ -190,9 +206,6 @@ class Autoaim:
 
                 self.kf_target.predict()
                 self.kf_target.update(measurement)
-                
-               
-                    
                 
                 # 预测未来位置
                 pred_x = self.kf_target.x[0]
@@ -252,15 +265,15 @@ class Autoaim:
                     # 卡尔曼滤波
                     self.kf_yaw.predict()
                     self.kf_yaw.update(yaw)
-                    smooth_yaw = float(self.kf_yaw.x[0])
+                    self.smooth_yaw = float(self.kf_yaw.x[0])
 
                     self.kf_pitch.predict()
                     self.kf_pitch.update(pitch)
-                    smooth_pitch = float(self.kf_pitch.x[0])
+                    self.smooth_pitch = float(self.kf_pitch.x[0])
                     
                     # 计算误差
-                    yaw_error = smooth_yaw
-                    pitch_error = smooth_pitch
+                    yaw_error = self.smooth_yaw
+                    pitch_error = self.smooth_pitch
                     
                     # 自动开火条件判断（只有Sentry兵种生效）
                     if self.robot_type.lower() == "sentry":
@@ -271,27 +284,38 @@ class Autoaim:
 
                         # 只要连续锁定目标的帧数超过一定值，就触发开火
                         if self.lock_count > self.fire_lock_frames:
-                            self.fire_command = 1  # 开火
+                            self.fire_command = 1  
                         else:
-                            self.fire_command = 0  # 不开火
+                            self.fire_command = 0  
                     else:
                         self.fire_command = 0  # 非sentry兵种不触发开火
                         
-                    cv2.putText(annotated_frame, f"Yaw: {smooth_yaw:.1f} deg", (10,60),
+                    cv2.putText(annotated_frame, f"Yaw: {self.smooth_yaw:.1f} deg", (10,60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Pitch: {smooth_pitch:.1f} deg", (10,90),
+                    cv2.putText(annotated_frame, f"Pitch: {self.smooth_pitch:.1f} deg", (10,90),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
                     cv2.putText(annotated_frame, f"Distance: {distance:.0f} mm", (10,120),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
                     cv2.putText(annotated_frame, f"Fire Command: {self.fire_command}", (10, 150),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
-            
+        
             else:
+                with self.lock:
+                    # 1. 数据归零
+                    self.smooth_yaw = 0.0
+                    self.smooth_pitch = 0.0
+                    self.distance = 0.0
+                    self.fire_command = 0
+                    self.lock_count = 0 # 重置锁定计数，防止闪现目标误开火
+                
+                # 2. 重置卡尔曼滤波器，防止下次出现目标时产生巨大的跳变预测
+                self.kf_yaw.x = np.array([0., 0.])
+                self.kf_pitch.x = np.array([0., 0.])
                 cv2.putText(annotated_frame, f"Best target selected: {best_target}", (10,60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
             self.update_web(annotated_frame)
-            
+        
     def update_web(self, frame):
         with self.lock:
             self.latest_frame = frame
@@ -300,6 +324,6 @@ class Autoaim:
         if hasattr(self, 'web_server') and self.web_server is not None:
             self.web_server.update_frame(frame)
 
-      
+    
 
     
