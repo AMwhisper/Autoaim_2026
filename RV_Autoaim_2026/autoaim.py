@@ -34,10 +34,10 @@ class Autoaim:
         # 红蓝方敌人标签设置
         if self.robot_color.lower() == 'red':
             # 我们是红色，敌人是蓝色
-            self.enemy_labels = [1, 2, 3, 4, 5, 8]
+            self.enemy_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         elif self.robot_color.lower() == 'blue':
             # 我们是蓝色，敌人是红色
-            self.enemy_labels = [10, 11, 12, 13, 14]
+            self.enemy_labels = [9, 10, 11, 12, 13, 14, 15, 16, 17]
         
         # 加载 YOLO 模型
         self.model = YOLO(model_path, task='detect')
@@ -290,7 +290,7 @@ class Autoaim:
                     else:
                         self.fire_command = 0  # 非sentry兵种不触发开火
                         
-                    cv2.putText(annotated_frame, f"Yaw: {self.smooth_yaw:.1f} deg", (10,60),
+                    cv2.putText(annotated_frame, f"Yaw: {-self.smooth_yaw:.1f} deg", (10,60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
                     cv2.putText(annotated_frame, f"Pitch: {self.smooth_pitch:.1f} deg", (10,90),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
