@@ -92,7 +92,9 @@ class GalaxyCamera:
                 continue
 
             # RAW Bayer → RGB
-            rgb_image = raw.convert("RGB")
+            # rotated_image = raw.raw8_rotate_90_ccw() #反转90度
+            # rgb_image = rotated_image.convert("RGB")
+            rgb_image = raw.convert("RGB") #不反转90度
             frame = rgb_image.get_numpy_array()
 
             if frame is None:
@@ -117,7 +119,9 @@ class GalaxyCamera:
         with self.lock:
             if self.latest_frame is None:
                 return None
-            return self.latest_frame.copy()
+            frame = self.latest_frame
+            # frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            return frame
 
     # ==================================================
     # 参数控制接口

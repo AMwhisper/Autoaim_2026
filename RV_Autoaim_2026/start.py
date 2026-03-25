@@ -36,7 +36,7 @@ def main():
     # ============================
     # 图像增强参数
     # ============================
-    parser.add_argument('--contrast', type=int, default=1.5, help='Contrast [-50,100]')
+    parser.add_argument('--contrast', type=int, default=2.0, help='Contrast [-50,100]')
     parser.add_argument('--gamma', type=float, default=1.0, help='Gamma [0.1,10.0]')
     parser.add_argument('--color_correction', type=int, default=1, help='Enable color correction (0 or 1)')
 
@@ -45,7 +45,7 @@ def main():
     # ============================
     parser.add_argument('--wb_r', type=float, default=1.5)
     parser.add_argument('--wb_g', type=float, default=1.0)
-    parser.add_argument('--wb_b', type=float, default=1.0)
+    parser.add_argument('--wb_b', type=float, default=1.2)
 
     # ============================
     # 图像增强开关

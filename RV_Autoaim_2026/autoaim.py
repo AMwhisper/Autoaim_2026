@@ -23,8 +23,8 @@ class Autoaim:
         self.last_time = time.time()
         self.robot_color = robot_color
         # Autoaim参数
-        self.fire_yaw_thresh = 10.0
-        self.fire_pitch_thresh = 10.0
+        self.fire_yaw_thresh = 3.0
+        self.fire_pitch_thresh = 3.0
         self.fire_lock_frames = 5
         self.lock_count = 0  
         self.fire_command = 0 
@@ -45,8 +45,8 @@ class Autoaim:
         self.lock = threading.Lock()
         
         # 预热模型（防止第一帧由于内存分配卡顿）
-        # dummy_input = np.zeros((320, 320, 3), dtype=np.uint8)
-        # self.model(dummy_input, imgsz=320, verbose=False)
+        dummy_input = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.model(dummy_input, imgsz=640, verbose=False)
         
         # -----------------------
         # 启动 YOLO 推理线程
@@ -160,11 +160,11 @@ class Autoaim:
             # results = self.model(frame, imgsz=640, verbose=False)
             results = self.model(
                 frame, 
-                imgsz=640,      
+                imgsz=512,      
                 stream=False,    
                 half=True,      
                 device=0,       
-                verbose=True
+                verbose=False
             )
             annotated_frame = results[0].plot()
             boxes = results[0].boxes.xyxy.cpu().numpy()
