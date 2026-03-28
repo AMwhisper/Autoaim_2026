@@ -30,7 +30,7 @@ class Autoaim:
         self.fire_command = 0 
         self.smooth_yaw = 0.0
         self.smooth_pitch = 0.0
-        
+        self.imgsz = 512
         # 红蓝方敌人标签设置
         if self.robot_color.lower() == 'red':
             # 我们是红色，敌人是蓝色
@@ -45,8 +45,8 @@ class Autoaim:
         self.lock = threading.Lock()
         
         # 预热模型（防止第一帧由于内存分配卡顿）
-        dummy_input = np.zeros((640, 640, 3), dtype=np.uint8)
-        self.model(dummy_input, imgsz=640, verbose=False)
+        dummy_input = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+        self.model(dummy_input, imgsz=self.imgsz, verbose=False)
         
         # -----------------------
         # 启动 YOLO 推理线程
@@ -160,7 +160,7 @@ class Autoaim:
             # results = self.model(frame, imgsz=640, verbose=False)
             results = self.model(
                 frame, 
-                imgsz=512,      
+                imgsz=self.imgsz,      
                 stream=False,    
                 half=True,      
                 device=0,       
@@ -253,7 +253,6 @@ class Autoaim:
                     # yaw/pitch 角度
                     yaw_cam = math.degrees(math.atan2(tvec[0], tvec[2]))
                     pitch_cam = math.degrees(math.atan2(-tvec[1], horizontal_distance))
-
                     # 弹道补偿
                     yaw, pitch = self.ballistic.solve(
                         yaw_cam,
@@ -272,8 +271,8 @@ class Autoaim:
                     self.smooth_pitch = float(self.kf_pitch.x[0])
                     
                     # 计算误差
-                    yaw_error = self.smooth_yaw
-                    pitch_error = self.smooth_pitch
+                    yaw_error = -self.smooth_yaw
+                    pitch_error = -self.smooth_pitch
                     
                     # 自动开火条件判断（只有Sentry兵种生效）
                     if self.robot_type.lower() == "sentry":
@@ -290,14 +289,14 @@ class Autoaim:
                     else:
                         self.fire_command = 0  # 非sentry兵种不触发开火
                         
-                    cv2.putText(annotated_frame, f"Yaw: {-self.smooth_yaw:.1f} deg", (10,60),
+                    cv2.putText(annotated_frame, f"Yaw_error: {yaw_error:.1f} deg", (10,60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Pitch: {self.smooth_pitch:.1f} deg", (10,90),
+                    cv2.putText(annotated_frame, f"Pitch_error: {pitch_error:.1f} deg", (10,90),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
                     cv2.putText(annotated_frame, f"Distance: {distance:.0f} mm", (10,120),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
                     cv2.putText(annotated_frame, f"Fire Command: {self.fire_command}", (10, 150),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     
         
             else:
