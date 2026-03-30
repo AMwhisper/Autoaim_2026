@@ -10,12 +10,13 @@ from flask import Flask
 from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 from RV_Autoaim_2026.ballistic_solver import BallisticSolver
+from RV_Autoaim_2026.logger import Logger
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-# model_path = os.path.join(base_dir, "best.pt")
 model_path = os.path.join(base_dir, "best.engine")
+
 class Autoaim:
-    def __init__(self, camera, robot_type = 'hero', robot_color = 'blue' ):
+    def __init__(self, camera, robot_type = 'hero', robot_color = 'blue'):
         self.camera = camera
         self.app = Flask(__name__)
         self.ballistic = BallisticSolver()
@@ -30,7 +31,8 @@ class Autoaim:
         self.fire_command = 0 
         self.smooth_yaw = 0.0
         self.smooth_pitch = 0.0
-        self.imgsz = 512
+        self.imgsz = 320
+
         # 红蓝方敌人标签设置
         if self.robot_color.lower() == 'red':
             # 我们是红色，敌人是蓝色
@@ -43,6 +45,8 @@ class Autoaim:
         self.model = YOLO(model_path, task='detect')
         self.latest_frame = None
         self.lock = threading.Lock()
+        self.detect_frame_count = 0
+        self.detect_fps_last_time = time.perf_counter()
         
         # 预热模型（防止第一帧由于内存分配卡顿）
         dummy_input = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
@@ -58,6 +62,9 @@ class Autoaim:
         # -----------------------
         # 初始化卡尔曼滤波器
         # -----------------------
+        self.last_kf_target_time = time.perf_counter()
+        self.kf_motion_gate_px = 10      # 每帧中心移动超过这个像素，认为是快速自运动
+        self.kf_velocity_decay = 0.3       # 大运动时速度衰减系数
         # 循环时间
         now = time.time()
         dt = now - self.last_time
@@ -140,8 +147,8 @@ class Autoaim:
         # 相机内参 (MER-230-168U3C)
         # fx, fy = 焦距像素, cx, cy = 图像中心
         h, w, _ = self.camera.get_frame().shape
-        fov_x = 49.6  # 水平 FOV
-        fov_y = 30.0  # 垂直 FOV
+        fov_x = 54.2  # 水平 FOV
+        fov_y = 44.6  # 垂直 FOV
         fx = w / (2 * np.tan(np.radians(fov_x / 2)))
         fy = h / (2 * np.tan(np.radians(fov_y / 2)))
         cx = w / 2
@@ -149,7 +156,7 @@ class Autoaim:
         camera_matrix = np.array([[fx, 0, cx],
                                 [0, fy, cy],
                                 [0,  0,  1]], dtype=np.float64)
-        dist_coeffs = np.zeros(4)  # 假设无畸变
+        dist_coeffs = np.zeros((5, 1), dtype=np.float64)  # 假设无畸变
 
         while self.running:
             frame = self.camera.get_frame()
@@ -157,7 +164,6 @@ class Autoaim:
               
                 continue
 
-            # results = self.model(frame, imgsz=640, verbose=False)
             results = self.model(
                 frame, 
                 imgsz=self.imgsz,      
@@ -192,7 +198,7 @@ class Autoaim:
                 if center_dist < min_center_dist:
                     min_center_dist = center_dist
                     best_target = det
-    
+
             if best_target is not None:
                 # print("No enemy target detected")
                 x1, y1, x2, y2 = best_target
@@ -200,16 +206,53 @@ class Autoaim:
                 # 目标中心
                 bx = (x1 + x2) / 2
                 by = (y1 + y2) / 2
+                # 关闭目标运动预测，直接使用当前检测中心
+                pred_x = float(bx)
+                pred_y = float(by)
+                # # 卡尔曼预测更新
+                # now_kf = time.perf_counter()
+                # dt = now_kf - self.last_kf_target_time
+                # self.last_kf_target_time = now_kf
 
-                # 卡尔曼预测更新
-                measurement = np.array([bx, by])
+                # # 防止 dt 异常
+                # dt = max(1e-3, min(dt, 0.1))
 
-                self.kf_target.predict()
-                self.kf_target.update(measurement)
-                
-                # 预测未来位置
-                pred_x = self.kf_target.x[0]
-                pred_y = self.kf_target.x[1]
+                # # 实时更新状态转移矩阵
+                # self.kf_target.F = np.array([
+                #     [1, 0, dt, 0],
+                #     [0, 1, 0, dt],
+                #     [0, 0, 1, 0 ],
+                #     [0, 0, 0, 1 ]
+                # ], dtype=np.float32)
+
+                # measurement = np.array([bx, by], dtype=np.float32)
+
+                # # 当前测量与上一时刻滤波中心的偏差
+                # meas_dx = float(measurement[0] - self.kf_target.x[0])
+                # meas_dy = float(measurement[1] - self.kf_target.x[1])
+                # meas_speed_px = math.hypot(meas_dx, meas_dy)
+
+                # # 先预测一步
+                # self.kf_target.predict()
+
+                # if meas_speed_px > self.kf_motion_gate_px:
+                #     # 速度项衰减，避免越甩越远
+                #     self.kf_target.x[2] *= self.kf_velocity_decay
+                #     self.kf_target.x[3] *= self.kf_velocity_decay
+
+                #     # 用测量值强行拉回位置
+                #     self.kf_target.update(measurement)
+
+                #     # 大运动时，预测点直接用测量点或滤波后位置
+                #     pred_x = float(measurement[0])
+                #     pred_y = float(measurement[1])
+                # else:
+                #     # 小运动时，正常滤波
+                #     self.kf_target.update(measurement)
+
+                #     # 这里不做额外超前，只取当前滤波位置
+                #     pred_x = float(self.kf_target.x[0])
+                #     pred_y = float(self.kf_target.x[1])
 
                 # 画预测点（调试）
                 cv2.circle(annotated_frame,(int(pred_x),int(pred_y)),6,(0,0,255),-1)
@@ -225,7 +268,7 @@ class Autoaim:
                     [pred_x-width/2, pred_y+height/2]
                 ], dtype=np.float64)
 
-                # 装甲板实际尺寸 (mm)
+                # 装甲板实际尺寸 灯条模拟 (mm)
                 aspect_ratio = (x2 - x1) / abs(y2 - y1)
                 if aspect_ratio > 3:
                     armor_real_width = 235
@@ -313,15 +356,15 @@ class Autoaim:
                 self.kf_pitch.x = np.array([0., 0.])
                 cv2.putText(annotated_frame, f"Best target selected: {best_target}", (10,60),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-            self.update_web(annotated_frame)
-        
-    def update_web(self, frame):
-        with self.lock:
-            self.latest_frame = frame
+
+    #         self.update_web(annotated_frame)
+    # def update_web(self, frame):
+    #     with self.lock:
+    #         self.latest_frame = frame
                 
-        # 向web传递最新帧
-        if hasattr(self, 'web_server') and self.web_server is not None:
-            self.web_server.update_frame(frame)
+    #     # 向web传递最新帧
+    #     if hasattr(self, 'web_server') and self.web_server is not None:
+    #         self.web_server.update_frame(frame)
 
     
 
