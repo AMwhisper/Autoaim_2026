@@ -16,7 +16,7 @@ class GalaxyCamera:
         self.frame_rate = frame_rate
         self.lock = threading.Lock()
         self.logger = logger
-  
+
         self.start_time = None
         self.frames_captured = 0
         self.last_fps_time = 0
@@ -41,7 +41,17 @@ class GalaxyCamera:
         # 关闭触发模式
         if self.cam.TriggerMode.is_implemented():
             self.cam.TriggerMode.set(gx.GxSwitchEntry.OFF)
-
+            
+        # 恢复原始分辨率 
+        if self.cam.Width.is_implemented():
+            self.cam.Width.set(1280)
+        if self.cam.Height.is_implemented():
+            self.cam.Height.set(1024)
+        if self.cam.OffsetX.is_implemented():
+            self.cam.OffsetX.set(0)
+        if self.cam.OffsetY.is_implemented():
+            self.cam.OffsetY.set(0)
+            
         # 设置帧率
         if self.cam.AcquisitionFrameRate.is_implemented():
             self.cam.AcquisitionFrameRate.set(self.frame_rate)
@@ -96,14 +106,15 @@ class GalaxyCamera:
             # rgb_image = rotated_image.convert("RGB")
             rgb_image = raw.convert("RGB") #不反转90度
             frame = rgb_image.get_numpy_array()
-
+            
+            # frame_resized = cv2.resize(frame, (640, 512), interpolation=cv2.INTER_LINEAR)
             if frame is None:
                 continue
 
             # 线程安全缓存
             with self.lock:
-                 self.latest_frame = frame # 原图
-
+                self.latest_frame = frame # 原图
+                # self.latest_frame = frame_resized
             # FPS统计
             self.frames_captured += 1
             now = time.time()
@@ -120,6 +131,7 @@ class GalaxyCamera:
             if self.latest_frame is None:
                 return None
             frame = self.latest_frame
+            
             # frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
             return frame
 

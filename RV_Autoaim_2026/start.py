@@ -26,7 +26,6 @@ def main():
     # ============================
     parser.add_argument('--fps', type=float, default=120, help='Camera acquisition frame rate')
     parser.add_argument('--port', type=int, default=5000, help='Web server port')
-
     # ============================
     # 摄像机基础参数
     # ============================
@@ -140,7 +139,7 @@ def main():
     autoaim = Autoaim(
         camera=camera,
         robot_type = args.robot_type, 
-        robot_color = args.robot_color
+        robot_color = args.robot_color,
     )
     
     # ============================
@@ -163,17 +162,17 @@ def main():
     # ============================
     # 启动 Web 服务
     # ============================
-    web_server = WebServer(  
-        host='0.0.0.0',
-        port=args.port
-    )
+    # web_server = WebServer(  
+    #     host='0.0.0.0',
+    #     port=args.port
+    # )
     
-    autoaim.web_server = web_server
+    # autoaim.web_server = web_server
     
     try:
-        logger.log("Main", f"Web服务启动 端口={args.port}")
-        # 用后台线程启动 Web 服务
-        threading.Thread(target=web_server.run, daemon=True).start()
+        # logger.log("Main", f"Web服务启动 端口={args.port}")
+        # # 用后台线程启动 Web 服务
+        # threading.Thread(target=web_server.run, daemon=True).start()
 
         # 主线程可以继续做其他事情，比如监控、发送数据
         while True:

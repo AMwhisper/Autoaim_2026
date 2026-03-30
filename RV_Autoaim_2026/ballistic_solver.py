@@ -13,7 +13,7 @@ class BallisticSolver:
         self.infantry_speed = 22.0
 
         # 相机 → 枪口结构 (m)
-        self.hero_cam_to_muzzle_x = 0.08
+        self.hero_cam_to_muzzle_x = 0.085
         self.hero_cam_to_muzzle_z = 0.00
         self.hero_cam_to_muzzle_y = 0.13
 

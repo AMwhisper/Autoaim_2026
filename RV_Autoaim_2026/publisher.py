@@ -11,7 +11,7 @@ class NodePublisher(Node):
              'autoaim_topic', 
              10
              )
-        self.timer = self.create_timer(0.01, self.timer_callback)  # 每秒发布一次
+        self.timer = self.create_timer(0.005, self.timer_callback)  
         self.get_logger().info('Autoaim Publisher Node started.')
 
     def timer_callback(self):
