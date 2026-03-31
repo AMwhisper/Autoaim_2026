@@ -1,31 +1,38 @@
-# RV_Autoaim_2026/start.py
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 import time
 import threading
+import cv2
 import rclpy
+import torch
 from rclpy.executors import SingleThreadedExecutor
+
 from RV_Autoaim_2026.publisher import NodePublisher
 from RV_Autoaim_2026.logger import Logger
 from RV_Autoaim_2026.camera import GalaxyCamera
 from RV_Autoaim_2026.autoaim import Autoaim
-from RV_Autoaim_2026.moniter import WebServer
+from RV_Autoaim_2026.monitor import Monitor
 
 def clamp(value, min_val, max_val):
-    """限制数值范围"""
     return max(min_val, min(value, max_val))
 
 
 def main():
+    cv2.setNumThreads(1)
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+
     parser = argparse.ArgumentParser(description="Start RV Autoaim Program")
 
     # ============================
     # 基础参数
     # ============================
-    parser.add_argument('--fps', type=float, default=120, help='Camera acquisition frame rate')
+    parser.add_argument('--fps', type=float, default=90, help='Camera acquisition frame rate')
     parser.add_argument('--port', type=int, default=5000, help='Web server port')
+
     # ============================
     # 摄像机基础参数
     # ============================
@@ -35,7 +42,7 @@ def main():
     # ============================
     # 图像增强参数
     # ============================
-    parser.add_argument('--contrast', type=int, default=2.0, help='Contrast [-50,100]')
+    parser.add_argument('--contrast', type=float, default=2.0, help='Contrast [-50,100]')
     parser.add_argument('--gamma', type=float, default=1.0, help='Gamma [0.1,10.0]')
     parser.add_argument('--color_correction', type=int, default=1, help='Enable color correction (0 or 1)')
 
@@ -49,14 +56,27 @@ def main():
     # ============================
     # 图像增强开关
     # ============================
-    parser.add_argument('--image_improvement', action='store_true',
-                        help='Enable image improvement for contrast/gamma/color')
-    
+    parser.add_argument(
+        '--image_improvement',
+        action='store_true',
+        help='Enable image improvement for contrast/gamma/color'
+    )
+
     # ============================
     # 兵种和红蓝方
     # ============================
     parser.add_argument("--robot_type", default="hero")
     parser.add_argument("--robot_color", default="red")
+    parser.add_argument('--yaw_bias_deg', type=float, default=-0.4, help='Static yaw zero-offset compensation in degrees')
+    parser.add_argument('--pitch_bias_deg', type=float, default=0.0, help='Static pitch zero-offset compensation in degrees')
+
+    # ============================
+    # Monitor / Web 开关
+    # ============================
+    parser.add_argument('--enable_monitor', action='store_true', help='Enable overlay drawing')
+    parser.add_argument('--enable_web', action='store_true', help='Enable web streaming')
+    parser.add_argument('--jpeg_quality', type=int, default=80, help='JPEG quality for web stream')
+
     args = parser.parse_args()
 
     logger = Logger("camera_web.log")
@@ -67,13 +87,12 @@ def main():
     # ============================
     camera = GalaxyCamera(
         frame_rate=args.fps,
-        # use_image_improvement=args.image_improvement,
         logger=logger,
-        robot_color = args.robot_color
+        robot_color=args.robot_color
     )
 
     camera.start()
-    time.sleep(1)  # 等待采集线程稳定
+    time.sleep(1)
 
     # ============================
     # 设置基础参数
@@ -124,62 +143,74 @@ def main():
     logger.log(
         "Main",
         f"""
-        参数加载完成:
-        FPS={args.fps}
-        Exposure={args.exposure}
-        Gain={args.gain}
-        Contrast={args.contrast}
-        Gamma={args.gamma}
-        WB=({wb_r},{wb_g},{wb_b})
-        """
+参数加载完成:
+FPS={args.fps}
+Exposure={args.exposure}
+Gain={args.gain}
+Contrast={args.contrast}
+Gamma={args.gamma}
+WB=({wb_r},{wb_g},{wb_b})
+YawBiasDeg={args.yaw_bias_deg}
+PitchBiasDeg={args.pitch_bias_deg}
+EnableMonitor={args.enable_monitor}
+EnableWeb={args.enable_web}
+WebPort={args.port}
+"""
     )
+
     # ============================
     # 启动 Autoaim
     # ============================
     autoaim = Autoaim(
         camera=camera,
-        robot_type = args.robot_type, 
-        robot_color = args.robot_color,
+        robot_type=args.robot_type,
+        robot_color=args.robot_color,
+        yaw_bias_deg=args.yaw_bias_deg,
+        pitch_bias_deg=args.pitch_bias_deg,
     )
+
+    # 把 monitor/web 参数写进去
+    autoaim.enable_monitor = args.enable_monitor
+    autoaim.enable_web = args.enable_web
     
+    autoaim.monitor = Monitor(
+        enable_draw=args.enable_monitor,
+        enable_web=args.enable_web,
+        host='0.0.0.0',
+        port=args.port,
+        jpeg_quality=args.jpeg_quality
+    )
+    autoaim.monitor.start()
+
     # ============================
     # 启动 ROS 2 Publisher
     # ============================
     rclpy.init()
-    # 将 autoaim 实例传入 Publisher
     ros_publisher = NodePublisher(autoaim)
-    
-    # 为了不阻塞主线程，用一个线程来跑 ROS 2 的 spin
+
     def ros_spin_thread():
         executor = SingleThreadedExecutor()
         executor.add_node(ros_publisher)
         executor.spin()
-        
+
     ros_thread = threading.Thread(target=ros_spin_thread, daemon=True)
     ros_thread.start()
-    # logger.log("Main", "ROS 2 Publisher 节点已启动并进入后台循环")
-    
-    # ============================
-    # 启动 Web 服务
-    # ============================
-    # web_server = WebServer(  
-    #     host='0.0.0.0',
-    #     port=args.port
-    # )
-    
-    # autoaim.web_server = web_server
-    
-    try:
-        # logger.log("Main", f"Web服务启动 端口={args.port}")
-        # # 用后台线程启动 Web 服务
-        # threading.Thread(target=web_server.run, daemon=True).start()
 
-        # 主线程可以继续做其他事情，比如监控、发送数据
+    try:
+        logger.log("Main", "系统启动完成")
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         logger.log("Main", "停止中...")
+
+        autoaim.running = False
         camera.stop()
+
+        try:
+            ros_publisher.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

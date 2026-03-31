@@ -1,4 +1,3 @@
-# RV_Autoaim_2026/yolo_web.py
 import cv2
 import time
 import threading
@@ -6,174 +5,233 @@ import os
 import math
 import numpy as np
 import rclpy
+import torch
 from flask import Flask
 from ultralytics import YOLO
-from filterpy.kalman import KalmanFilter
+
 from RV_Autoaim_2026.ballistic_solver import BallisticSolver
 from RV_Autoaim_2026.logger import Logger
+from RV_Autoaim_2026.kalman_tracker import AngleKalman, TargetKalman
+from RV_Autoaim_2026.pnp_solver import ArmorPnPSolver
+from RV_Autoaim_2026.monitor import Monitor
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(base_dir, "best.engine")
+model_path = os.path.join(base_dir, "weight/best_320s.engine")
+
 
 class Autoaim:
-    def __init__(self, camera, robot_type = 'hero', robot_color = 'blue'):
+    def __init__(
+        self,
+        camera,
+        robot_type='hero',
+        robot_color='blue',
+        yaw_bias_deg=0.0,
+        pitch_bias_deg=0.0,
+    ):
         self.camera = camera
         self.app = Flask(__name__)
         self.ballistic = BallisticSolver()
         self.robot_type = robot_type
         self.last_time = time.time()
         self.robot_color = robot_color
-        # Autoaim参数
+        self.yaw_bias_deg = float(yaw_bias_deg)
+        self.pitch_bias_deg = float(pitch_bias_deg)
+    
+        # ============================
+        # 性能统计
+        # ============================
+        self.show_perf_log = True              # 是否打印性能信息
+        self.perf_log_interval = 1.0           # 每隔多少秒打印一次
+        self.perf_last_log_time = time.perf_counter()
+
+        self.yolo_fps = 0.0
+        self.full_fps = 0.0
+        self.yolo_time_ms = 0.0
+        self.full_time_ms = 0.0
+
+        self.perf_frame_count = 0
+        self.perf_yolo_time_sum = 0.0
+        self.perf_full_time_sum = 0.0
+        # ============================
+        # Autoaim 参数
+        # ============================
         self.fire_yaw_thresh = 3.0
         self.fire_pitch_thresh = 3.0
         self.fire_lock_frames = 5
-        self.lock_count = 0  
-        self.fire_command = 0 
+        self.lock_count = 0
+        self.fire_command = 0
         self.smooth_yaw = 0.0
         self.smooth_pitch = 0.0
+        self.distance = 0.0
         self.imgsz = 320
+        self.command_deadband_yaw = 0.35
+        self.command_deadband_pitch = 0.35
+        self.command_timeout_sec = 0.035
+        self.last_output_time = 0.0
+        self.output_seq = 0
 
+        # ============================
+        # Monitor / Web 开关
+        # ============================
+        self.enable_monitor = False   # 是否绘制调试信息
+        self.enable_web = False       # 是否开启网页推流
+
+        self.monitor = Monitor(
+            enable_draw=self.enable_monitor,
+            enable_web=self.enable_web,
+            host="0.0.0.0",
+            port=5000,
+            jpeg_quality=80
+        )
+        self.monitor.start()
+
+        # ============================
         # 红蓝方敌人标签设置
+        # ============================
         if self.robot_color.lower() == 'red':
-            # 我们是红色，敌人是蓝色
             self.enemy_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         elif self.robot_color.lower() == 'blue':
-            # 我们是蓝色，敌人是红色
             self.enemy_labels = [9, 10, 11, 12, 13, 14, 15, 16, 17]
-        
+        else:
+            self.enemy_labels = []
+
+        # ============================
         # 加载 YOLO 模型
+        # ============================
         self.model = YOLO(model_path, task='detect')
         self.latest_frame = None
         self.lock = threading.Lock()
+        self.output_condition = threading.Condition(self.lock)
         self.detect_frame_count = 0
         self.detect_fps_last_time = time.perf_counter()
-        
-        # 预热模型（防止第一帧由于内存分配卡顿）
+
+        # 预热模型
         dummy_input = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
         self.model(dummy_input, imgsz=self.imgsz, verbose=False)
-        
-        # -----------------------
-        # 启动 YOLO 推理线程
-        # -----------------------
+
+        # ============================
+        # 初始化卡尔曼
+        # ============================
+        self.kf_yaw = AngleKalman()
+        self.kf_pitch = AngleKalman()
+        self.kf_target = TargetKalman()
+        self.last_kf_target_time = time.perf_counter()
+
+        # ============================
+        # PnP 求解器延迟初始化
+        # ============================
+        self.pnp_solver = None
+
+        # ============================
+        # 启动推理线程
+        # ============================
         self.running = True
         self.thread = threading.Thread(target=self.autoaim_loop, daemon=True)
         self.thread.start()
-        
-        # -----------------------
-        # 初始化卡尔曼滤波器
-        # -----------------------
-        self.last_kf_target_time = time.perf_counter()
-        self.kf_motion_gate_px = 10      # 每帧中心移动超过这个像素，认为是快速自运动
-        self.kf_velocity_decay = 0.3       # 大运动时速度衰减系数
-        # 循环时间
-        now = time.time()
-        dt = now - self.last_time
-        self.last_time = now  
-        
-        # yaw
-        self.kf_yaw = KalmanFilter(dim_x=2, dim_z=1)
-        self.kf_yaw.x = np.array([0., 0.])     # [angle, velocity]
-        self.kf_yaw.P = np.array([
-            [1., 0.],
-            [0., 1.]
-        ])
-        self.kf_yaw.F = np.array([
-            [1., dt],
-            [0., 1.]
-        ])
-        self.kf_yaw.H = np.array([
-            [1., 0.]
-        ])
-        self.kf_yaw.R = np.array([[0.1]])
-        self.kf_yaw.Q = np.array([
-            [1e-4, 0.],
-            [0., 1e-4]
-        ])
-        # pitch
-        self.kf_pitch = KalmanFilter(dim_x=2, dim_z=1)
-        self.kf_pitch.x = np.array([0., 0.])
-        self.kf_pitch.P = np.array([
-            [1., 0.],
-            [0., 1.]
-        ])
-        self.kf_pitch.F = np.array([
-            [1., dt],
-            [0., 1.]
-        ])
-        self.kf_pitch.H = np.array([
-            [1., 0.]
-        ])
-        self.kf_pitch.R = np.array([[0.1]])
-        self.kf_pitch.Q = np.array([
-            [1e-4, 0.],
-            [0., 1e-4]
-        ])
-        
-        # 卡尔曼预测
-        self.kf_target = KalmanFilter(dim_x=4, dim_z=2)
-        self.kf_target.x = np.array([0.,0.,0.,0.])
-        self.kf_target.F = np.array([
-            [1,0,1,0],
-            [0,1,0,1],
-            [0,0,1,0],
-            [0,0,0,1]
-        ])
 
-        self.kf_target.H = np.array([
-            [1,0,0,0],
-            [0,1,0,0]
-        ])
+    def apply_deadband(self, value: float, threshold: float) -> float:
+        return 0.0 if abs(value) < threshold else float(value)
 
-        self.kf_target.P *= 10
-        self.kf_target.R *= 5
-        self.kf_target.Q *= 0.01
-        
 
-    # ============================
-    # YOLO + solvePnP + 卡尔曼滤波循环
-    # ============================
+    def update_control_state(self, yaw: float, pitch: float, distance: float, fire: int):
+        with self.output_condition:
+            self.smooth_yaw = self.apply_deadband(yaw, self.command_deadband_yaw)
+            self.smooth_pitch = self.apply_deadband(pitch, self.command_deadband_pitch)
+            self.distance = distance
+            self.fire_command = int(fire)
+            self.last_output_time = time.perf_counter()
+            self.output_seq += 1
+            self.output_condition.notify_all()
+
+    def reset_control_state(self):
+        with self.output_condition:
+            self.smooth_yaw = 0.0
+            self.smooth_pitch = 0.0
+            self.distance = 0.0
+            self.fire_command = 0
+            self.lock_count = 0
+            self.last_output_time = time.perf_counter()
+            self.output_seq += 1
+            self.output_condition.notify_all()
+
+    def get_publish_control(self):
+        now = time.perf_counter()
+        with self.lock:
+            yaw = float(self.smooth_yaw)
+            pitch = float(self.smooth_pitch)
+            fire = int(self.fire_command)
+            output_seq = int(self.output_seq)
+            source_timestamp = float(self.last_output_time)
+            age = now - source_timestamp if source_timestamp > 0.0 else float("inf")
+
+        if age > self.command_timeout_sec:
+            return 0.0, 0.0, 0, output_seq, age, source_timestamp
+
+        return yaw, pitch, fire, output_seq, age, source_timestamp
+
+    def wait_for_control_update(self, last_seq: int, timeout: float = 0.1):
+        with self.output_condition:
+            if self.output_seq == last_seq:
+                self.output_condition.wait(timeout=timeout)
+
+            now = time.perf_counter()
+            yaw = float(self.smooth_yaw)
+            pitch = float(self.smooth_pitch)
+            fire = int(self.fire_command)
+            output_seq = int(self.output_seq)
+            source_timestamp = float(self.last_output_time)
+            age = now - source_timestamp if source_timestamp > 0.0 else float("inf")
+
+        if age > self.command_timeout_sec:
+            return 0.0, 0.0, 0, output_seq, age, source_timestamp
+
+        return yaw, pitch, fire, output_seq, age, source_timestamp
+
     def autoaim_loop(self):
-        
-        # --- 1. 等待相机准备就绪 ---
         print("等待相机首帧图像...")
         frame = None
         while frame is None and self.running:
             frame = self.camera.get_frame()
             if frame is None:
                 time.sleep(0.1)
-        
-        if not self.running: return
-        
-        # 相机内参 (MER-230-168U3C)
-        # fx, fy = 焦距像素, cx, cy = 图像中心
-        h, w, _ = self.camera.get_frame().shape
-        fov_x = 54.2  # 水平 FOV
-        fov_y = 44.6  # 垂直 FOV
-        fx = w / (2 * np.tan(np.radians(fov_x / 2)))
-        fy = h / (2 * np.tan(np.radians(fov_y / 2)))
-        cx = w / 2
-        cy = h / 2
-        camera_matrix = np.array([[fx, 0, cx],
-                                [0, fy, cy],
-                                [0,  0,  1]], dtype=np.float64)
-        dist_coeffs = np.zeros((5, 1), dtype=np.float64)  # 假设无畸变
+
+        if not self.running:
+            return
+
+        h, w, _ = frame.shape
+        self.pnp_solver = ArmorPnPSolver(w, h)
 
         while self.running:
+            full_start = time.perf_counter()
+
             frame = self.camera.get_frame()
+     
+
             if frame is None:
-              
                 continue
 
+            # ============================
+            # YOLO 推理计时
+            # ============================
+            torch.cuda.synchronize()
+            yolo_start = time.perf_counter()
             results = self.model(
-                frame, 
-                imgsz=self.imgsz,      
-                stream=False,    
-                half=True,      
-                device=0,       
+                frame,
+                imgsz=self.imgsz,
+                stream=False,
+                half=True,
+                device=0,
                 verbose=False
             )
-            annotated_frame = results[0].plot()
+            torch.cuda.synchronize()
+
+            yolo_end = time.perf_counter()
+            yolo_time = yolo_end - yolo_start
+
+            # 一次性取出，避免循环里反复 .cpu().numpy()
             boxes = results[0].boxes.xyxy.cpu().numpy()
+            classes = results[0].boxes.cls.cpu().numpy().astype(int)
+
             best_target = None
             min_center_dist = float('inf')
 
@@ -181,121 +239,50 @@ class Autoaim:
             cx_img = w / 2
             cy_img = h / 2
 
+            # ============================
+            # 选择最近中心的敌方目标
+            # ============================
             for i, det in enumerate(boxes):
-                label = int(results[0].boxes.cls[i].cpu().numpy())
-                # print(f"Label: {label}")
-                # print(f"Enemy labels: {self.enemy_labels}, Current label: {label}")
+                label = classes[i]
                 if label not in self.enemy_labels:
-                    # print(f"Label: {label}")
-                    continue  
+                    continue
 
                 x1, y1, x2, y2 = det
                 bx = (x1 + x2) / 2
                 by = (y1 + y2) / 2
                 center_dist = math.hypot(bx - cx_img, by - cy_img)
-                # print(f"Calculated Center Distance: {center_dist}")
-                
+
                 if center_dist < min_center_dist:
                     min_center_dist = center_dist
                     best_target = det
 
+            # ============================
+            # 有目标
+            # ============================
             if best_target is not None:
-                # print("No enemy target detected")
                 x1, y1, x2, y2 = best_target
-                
+
                 # 目标中心
                 bx = (x1 + x2) / 2
                 by = (y1 + y2) / 2
-                # 关闭目标运动预测，直接使用当前检测中心
-                pred_x = float(bx)
-                pred_y = float(by)
-                # # 卡尔曼预测更新
-                # now_kf = time.perf_counter()
-                # dt = now_kf - self.last_kf_target_time
-                # self.last_kf_target_time = now_kf
 
-                # # 防止 dt 异常
-                # dt = max(1e-3, min(dt, 0.1))
+                # 目标中心卡尔曼预测
+                now_kf = time.perf_counter()
+                dt = now_kf - self.last_kf_target_time
+                self.last_kf_target_time = now_kf
 
-                # # 实时更新状态转移矩阵
-                # self.kf_target.F = np.array([
-                #     [1, 0, dt, 0],
-                #     [0, 1, 0, dt],
-                #     [0, 0, 1, 0 ],
-                #     [0, 0, 0, 1 ]
-                # ], dtype=np.float32)
+                pred_x, pred_y = self.kf_target.predict_update(bx, by, dt)
 
-                # measurement = np.array([bx, by], dtype=np.float32)
+                # PnP
+                pnp_result = self.pnp_solver.solve_from_bbox(
+                    pred_x, pred_y, x1, y1, x2, y2
+                )
 
-                # # 当前测量与上一时刻滤波中心的偏差
-                # meas_dx = float(measurement[0] - self.kf_target.x[0])
-                # meas_dy = float(measurement[1] - self.kf_target.x[1])
-                # meas_speed_px = math.hypot(meas_dx, meas_dy)
+                if pnp_result is not None:
+                    distance = pnp_result["distance"]
+                    yaw_cam = pnp_result["yaw_cam"]
+                    pitch_cam = pnp_result["pitch_cam"]
 
-                # # 先预测一步
-                # self.kf_target.predict()
-
-                # if meas_speed_px > self.kf_motion_gate_px:
-                #     # 速度项衰减，避免越甩越远
-                #     self.kf_target.x[2] *= self.kf_velocity_decay
-                #     self.kf_target.x[3] *= self.kf_velocity_decay
-
-                #     # 用测量值强行拉回位置
-                #     self.kf_target.update(measurement)
-
-                #     # 大运动时，预测点直接用测量点或滤波后位置
-                #     pred_x = float(measurement[0])
-                #     pred_y = float(measurement[1])
-                # else:
-                #     # 小运动时，正常滤波
-                #     self.kf_target.update(measurement)
-
-                #     # 这里不做额外超前，只取当前滤波位置
-                #     pred_x = float(self.kf_target.x[0])
-                #     pred_y = float(self.kf_target.x[1])
-
-                # 画预测点（调试）
-                cv2.circle(annotated_frame,(int(pred_x),int(pred_y)),6,(0,0,255),-1)
-
-                # 用预测中心构造bbox
-                width = x2 - x1
-                height = y2 - y1
-
-                image_points = np.array([
-                    [pred_x-width/2, pred_y-height/2],
-                    [pred_x+width/2, pred_y-height/2],
-                    [pred_x+width/2, pred_y+height/2],
-                    [pred_x-width/2, pred_y+height/2]
-                ], dtype=np.float64)
-
-                # 装甲板实际尺寸 灯条模拟 (mm)
-                aspect_ratio = (x2 - x1) / abs(y2 - y1)
-                if aspect_ratio > 3:
-                    armor_real_width = 235
-                    armor_real_height = 60
-                else:
-                    armor_real_width = 140
-                    armor_real_height = 60
-
-                # 真实世界坐标 (以装甲板中心为原点)
-                object_points = np.array([
-                    [-armor_real_width/2,  armor_real_height/2, 0],
-                    [ armor_real_width/2,  armor_real_height/2, 0],
-                    [ armor_real_width/2, -armor_real_height/2, 0],
-                    [-armor_real_width/2, -armor_real_height/2, 0]
-                ], dtype=np.float64)
-
-                # solvePnP
-                success, rvec, tvec = cv2.solvePnP(object_points, image_points,
-                                                camera_matrix, dist_coeffs)
-                if success:
-                    # tvec = [X, Y, Z] mm，Z方向就是相机距离
-                    distance = np.linalg.norm(tvec)
-                    horizontal_distance = math.sqrt(tvec[0]**2 + tvec[2]**2)
-
-                    # yaw/pitch 角度
-                    yaw_cam = math.degrees(math.atan2(tvec[0], tvec[2]))
-                    pitch_cam = math.degrees(math.atan2(-tvec[1], horizontal_distance))
                     # 弹道补偿
                     yaw, pitch = self.ballistic.solve(
                         yaw_cam,
@@ -304,68 +291,125 @@ class Autoaim:
                         self.robot_type
                     )
 
-                    # 卡尔曼滤波
-                    self.kf_yaw.predict()
-                    self.kf_yaw.update(yaw)
-                    self.smooth_yaw = float(self.kf_yaw.x[0])
+                    yaw += self.yaw_bias_deg
+                    pitch += self.pitch_bias_deg
 
-                    self.kf_pitch.predict()
-                    self.kf_pitch.update(pitch)
-                    self.smooth_pitch = float(self.kf_pitch.x[0])
-                    
-                    # 计算误差
-                    yaw_error = -self.smooth_yaw
-                    pitch_error = -self.smooth_pitch
-                    
-                    # 自动开火条件判断（只有Sentry兵种生效）
+                    # yaw / pitch 卡尔曼平滑
+                    smooth_yaw = self.kf_yaw.predict_update(yaw)
+                    smooth_pitch = self.kf_pitch.predict_update(pitch)
+
+                    # 控制误差
+                    yaw_error = -smooth_yaw
+                    pitch_error = -smooth_pitch
+
+                    # 自动开火逻辑
                     if self.robot_type.lower() == "sentry":
                         if abs(yaw_error) < self.fire_yaw_thresh and abs(pitch_error) < self.fire_pitch_thresh:
                             self.lock_count += 1
                         else:
                             self.lock_count = 0
 
-                        # 只要连续锁定目标的帧数超过一定值，就触发开火
                         if self.lock_count > self.fire_lock_frames:
-                            self.fire_command = 1  
+                            self.fire_command = 1
                         else:
-                            self.fire_command = 0  
+                            self.fire_command = 0
                     else:
-                        self.fire_command = 0  # 非sentry兵种不触发开火
-                        
-                    cv2.putText(annotated_frame, f"Yaw_error: {yaw_error:.1f} deg", (10,60),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Pitch_error: {pitch_error:.1f} deg", (10,90),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Distance: {distance:.0f} mm", (10,120),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                    cv2.putText(annotated_frame, f"Fire Command: {self.fire_command}", (10, 150),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-        
-            else:
-                with self.lock:
-                    # 1. 数据归零
-                    self.smooth_yaw = 0.0
-                    self.smooth_pitch = 0.0
-                    self.distance = 0.0
+                        self.fire_command = 0
+
+                    current_fire_command = self.fire_command
+                    self.update_control_state(
+                        yaw=smooth_yaw,
+                        pitch=smooth_pitch,
+                        distance=distance,
+                        fire=current_fire_command
+                    )
+
+                    # 调试显示 / Web 推流
+                    if self.enable_monitor or self.enable_web:
+                        self.monitor.render(
+                            frame=frame,
+                            boxes=[best_target],
+                            pred_point=(pred_x, pred_y),
+                            yaw_error=yaw_error,
+                            pitch_error=pitch_error,
+                            distance=distance,
+                            fire_command=self.fire_command,
+                            best_target=best_target
+                        )
+
+                else:
+                    # solvePnP 失败也当作未有效锁定
                     self.fire_command = 0
-                    self.lock_count = 0 # 重置锁定计数，防止闪现目标误开火
-                
-                # 2. 重置卡尔曼滤波器，防止下次出现目标时产生巨大的跳变预测
-                self.kf_yaw.x = np.array([0., 0.])
-                self.kf_pitch.x = np.array([0., 0.])
-                cv2.putText(annotated_frame, f"Best target selected: {best_target}", (10,60),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                    self.reset_control_state()
+                    self.kf_yaw.reset()
+                    self.kf_pitch.reset()
 
-    #         self.update_web(annotated_frame)
-    # def update_web(self, frame):
-    #     with self.lock:
-    #         self.latest_frame = frame
-                
-    #     # 向web传递最新帧
-    #     if hasattr(self, 'web_server') and self.web_server is not None:
-    #         self.web_server.update_frame(frame)
+                    if self.enable_monitor or self.enable_web:
+                        self.monitor.render(
+                            frame=frame,
+                            boxes=[best_target],
+                            pred_point=(pred_x, pred_y),
+                            yaw_error=None,
+                            pitch_error=None,
+                            distance=None,
+                            fire_command=0,
+                            best_target=best_target
+                        )
 
-    
+            # ============================
+            # 无目标
+            # ============================
+            else:
+                self.reset_control_state()
+                self.kf_yaw.reset()
+                self.kf_pitch.reset()
+                self.kf_target.reset()
 
-    
+                if self.enable_monitor or self.enable_web:
+                    self.monitor.render(
+                        frame=frame,
+                        boxes=None,
+                        pred_point=None,
+                        yaw_error=0.0,
+                        pitch_error=0.0,
+                        distance=0.0,
+                        fire_command=0,
+                        best_target=None
+                    )
+
+            # ============================
+            # 完整链路计时
+            # ============================
+            full_end = time.perf_counter()
+            full_time = full_end - full_start
+
+            self.yolo_time_ms = yolo_time * 1000.0
+            self.full_time_ms = full_time * 1000.0
+            self.yolo_fps = 1.0 / yolo_time if yolo_time > 1e-6 else 0.0
+            self.full_fps = 1.0 / full_time if full_time > 1e-6 else 0.0
+
+            # 累积平均
+            self.perf_frame_count += 1
+            self.perf_yolo_time_sum += yolo_time
+            self.perf_full_time_sum += full_time
+
+            now = time.perf_counter()
+            if self.show_perf_log and (now - self.perf_last_log_time) >= self.perf_log_interval:
+                avg_yolo_time = self.perf_yolo_time_sum / max(self.perf_frame_count, 1)
+                avg_full_time = self.perf_full_time_sum / max(self.perf_frame_count, 1)
+
+                avg_yolo_fps = 1.0 / avg_yolo_time if avg_yolo_time > 1e-6 else 0.0
+                avg_full_fps = 1.0 / avg_full_time if avg_full_time > 1e-6 else 0.0
+
+                print(
+                    f"[PERF] "
+                    f"YOLO: {self.yolo_time_ms:.2f} ms ({self.yolo_fps:.2f} FPS) | "
+                    f"FULL: {self.full_time_ms:.2f} ms ({self.full_fps:.2f} FPS) | "
+                    f"AVG YOLO: {avg_yolo_time * 1000.0:.2f} ms ({avg_yolo_fps:.2f} FPS) | "
+                    f"AVG FULL: {avg_full_time * 1000.0:.2f} ms ({avg_full_fps:.2f} FPS)"
+                )
+
+                self.perf_frame_count = 0
+                self.perf_yolo_time_sum = 0.0
+                self.perf_full_time_sum = 0.0
+                self.perf_last_log_time = now

@@ -8,7 +8,7 @@ import numpy as np
 
 class GalaxyCamera:
 
-    def __init__(self, frame_rate = 120, logger = None, robot_color = 'blue'):
+    def __init__(self, frame_rate = 240, logger = None, robot_color = 'blue'):
         self.device_manager = gx.DeviceManager()
         self.cam = None
         self.latest_frame = None
@@ -16,9 +16,12 @@ class GalaxyCamera:
         self.frame_rate = frame_rate
         self.lock = threading.Lock()
         self.logger = logger
+        self.latest_frame_consumed = True
 
         self.start_time = None
         self.frames_captured = 0
+        self.frames_converted = 0
+        self.frames_skipped = 0
         self.last_fps_time = 0
         
         self.robot_color = robot_color
@@ -101,6 +104,15 @@ class GalaxyCamera:
             if raw is None or raw.get_status() != gx.GxFrameStatusList.SUCCESS:
                 continue
 
+            # 如果上一帧还没被推理线程取走，就直接丢掉这一帧，
+            # 避免把 CPU 花在无效的 Bayer->RGB 转换上。
+            with self.lock:
+                should_skip_convert = self.latest_frame is not None and not self.latest_frame_consumed
+
+            if should_skip_convert:
+                self.frames_skipped += 1
+                continue
+
             # RAW Bayer → RGB
             # rotated_image = raw.raw8_rotate_90_ccw() #反转90度
             # rgb_image = rotated_image.convert("RGB")
@@ -114,13 +126,21 @@ class GalaxyCamera:
             # 线程安全缓存
             with self.lock:
                 self.latest_frame = frame # 原图
+                self.latest_frame_consumed = False
                 # self.latest_frame = frame_resized
             # FPS统计
             self.frames_captured += 1
+            self.frames_converted += 1
             now = time.time()
             if now - self.last_fps_time >= 1.0:
-                # print(f"Camera FPS: {self.frames_captured}")
+                if self.logger is not None:
+                    self.logger.log(
+                        "Camera",
+                        f"capture={self.frames_captured} convert={self.frames_converted} skip={self.frames_skipped}"
+                    )
                 self.frames_captured = 0
+                self.frames_converted = 0
+                self.frames_skipped = 0
                 self.last_fps_time = now
 
     # ==================================================
@@ -131,6 +151,7 @@ class GalaxyCamera:
             if self.latest_frame is None:
                 return None
             frame = self.latest_frame
+            self.latest_frame_consumed = True
             
             # frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
             return frame
