@@ -14,6 +14,7 @@ from RV_Autoaim_2026.publisher import NodePublisher
 from RV_Autoaim_2026.logger import Logger
 from RV_Autoaim_2026.camera import GalaxyCamera
 from RV_Autoaim_2026.autoaim import Autoaim
+from RV_Autoaim_2026.detector import YoloDetector
 from RV_Autoaim_2026.monitor import Monitor
 
 def clamp(value, min_val, max_val):
@@ -73,6 +74,8 @@ def main():
     # ============================
     # Monitor / Web 开关
     # ============================
+    parser.add_argument('--disable_autoaim', action='store_true', help='Disable YOLO detection and autoaim processing')
+    parser.add_argument('--detector_only', action='store_true', help='Run YOLO detection only without autoaim solving')
     parser.add_argument('--enable_monitor', action='store_true', help='Enable overlay drawing')
     parser.add_argument('--enable_web', action='store_true', help='Enable web streaming')
     parser.add_argument('--jpeg_quality', type=int, default=80, help='JPEG quality for web stream')
@@ -152,21 +155,20 @@ Gamma={args.gamma}
 WB=({wb_r},{wb_g},{wb_b})
 YawBiasDeg={args.yaw_bias_deg}
 PitchBiasDeg={args.pitch_bias_deg}
+DisableAutoaim={args.disable_autoaim}
+DetectorOnly={args.detector_only}
 EnableMonitor={args.enable_monitor}
 EnableWeb={args.enable_web}
 WebPort={args.port}
 """
     )
 
-    # ============================
-    # 启动 Autoaim
-    # ============================
     autoaim = Autoaim(
-        camera=camera,
         robot_type=args.robot_type,
         robot_color=args.robot_color,
         yaw_bias_deg=args.yaw_bias_deg,
         pitch_bias_deg=args.pitch_bias_deg,
+        logger=logger,
     )
 
     # 把 monitor/web 参数写进去
@@ -181,6 +183,43 @@ WebPort={args.port}
         jpeg_quality=args.jpeg_quality
     )
     autoaim.monitor.start()
+
+    processing_thread = None
+    if args.disable_autoaim:
+        autoaim.reset_control_state()
+        logger.log("Main", "自瞄处理已关闭")
+    else:
+        detector = YoloDetector(robot_color=args.robot_color, imgsz=320)
+
+        def processing_loop():
+            while autoaim.running:
+                frame = camera.get_frame()
+                if frame is None:
+                    time.sleep(0.001)
+                    continue
+
+                full_start = time.perf_counter()
+                detection_result = detector.detect(frame)
+                if args.detector_only:
+                    autoaim.reset_control_state()
+                    if (autoaim.enable_monitor or autoaim.enable_web) and autoaim.monitor is not None:
+                        autoaim.monitor.render(
+                            frame=frame,
+                            boxes=[detection_result["best_target"]] if detection_result["best_target"] is not None else None,
+                            pred_point=None,
+                            yaw_error=0.0,
+                            pitch_error=0.0,
+                            distance=0.0,
+                            fire_command=0,
+                            best_target=detection_result["best_target"]
+                        )
+                else:
+                    autoaim.process_frame(frame, detection_result)
+                full_time = time.perf_counter() - full_start
+                autoaim.record_perf(detection_result["yolo_time_s"], full_time)
+
+        processing_thread = threading.Thread(target=processing_loop, daemon=True)
+        processing_thread.start()
 
     # ============================
     # 启动 ROS 2 Publisher
@@ -204,6 +243,8 @@ WebPort={args.port}
         logger.log("Main", "停止中...")
 
         autoaim.running = False
+        if processing_thread is not None:
+            processing_thread.join(timeout=1.0)
         camera.stop()
 
         try:

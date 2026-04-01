@@ -5,7 +5,7 @@ from flask import Flask, Response, render_template_string
 
 
 class Monitor:
-    def __init__(self, enable_draw=True, enable_web=False, host="0.0.0.0", port=5000, jpeg_quality=80):
+    def __init__(self, enable_draw=False, enable_web=False, host="0.0.0.0", port=5000, jpeg_quality=80):
         self.enable_draw = enable_draw
         self.enable_web = enable_web
         self.host = host

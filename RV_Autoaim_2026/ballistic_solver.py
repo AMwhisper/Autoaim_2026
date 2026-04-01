@@ -17,9 +17,13 @@ class BallisticSolver:
         self.hero_cam_to_muzzle_z = 0.00
         self.hero_cam_to_muzzle_y = 0.13
 
-        self.infantry_cam_to_muzzle_x = 0.08
+        self.sentry_cam_to_muzzle_x = 0.0
+        self.sentry_cam_to_muzzle_z = 0.00
+        self.sentry_cam_to_muzzle_y = 0.09
+
+        self.infantry_cam_to_muzzle_x = 0.0
         self.infantry_cam_to_muzzle_z = 0.00
-        self.infantry_cam_to_muzzle_y = 0.13
+        self.infantry_cam_to_muzzle_y = 0.09
         
     def solve(self, yaw_cam_deg, pitch_cam_deg, distance_mm, robot="hero"):
 
@@ -34,7 +38,12 @@ class BallisticSolver:
             cam_to_muzzle_x = self.hero_cam_to_muzzle_x
             cam_to_muzzle_y = self.hero_cam_to_muzzle_y
             cam_to_muzzle_z = self.hero_cam_to_muzzle_z
-        else:
+        elif robot == "sentry":
+            v = self.hero_speed
+            cam_to_muzzle_x = self.sentry_cam_to_muzzle_x
+            cam_to_muzzle_y = self.sentry_cam_to_muzzle_y
+            cam_to_muzzle_z = self.sentry_cam_to_muzzle_z
+        elif robot == "infantry":
             v = self.infantry_speed
             cam_to_muzzle_x = self.infantry_cam_to_muzzle_x
             cam_to_muzzle_y = self.infantry_cam_to_muzzle_y

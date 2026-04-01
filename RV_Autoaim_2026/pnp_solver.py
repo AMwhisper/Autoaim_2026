@@ -4,7 +4,7 @@ import cv2
 
 
 class ArmorPnPSolver:
-    def __init__(self, frame_width: int, frame_height: int, fov_x: float = 54.2, fov_y: float = 44.6):
+    def __init__(self, frame_width: int, frame_height: int, fov_x: float = 57.3, fov_y: float = 43.8):
         self.frame_width = frame_width
         self.frame_height = frame_height
         self.fov_x = fov_x

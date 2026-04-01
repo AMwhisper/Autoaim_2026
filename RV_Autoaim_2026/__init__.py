@@ -3,6 +3,7 @@
 from .camera import GalaxyCamera
 from .logger import Logger
 from .autoaim import Autoaim
+from .detector import YoloDetector
 from .ballistic_solver import BallisticSolver
 from .monitor import Monitor
 from .pnp_solver import ArmorPnPSolver
@@ -11,6 +12,7 @@ from .kalman_tracker import AngleKalman, TargetKalman
 __all__ = ['GalaxyCamera', 
 'Logger',
 'Autoaim',
+'YoloDetector',
 'BallisticSolver',
 'ArmorPnPSolver',
 'NodePublisher',

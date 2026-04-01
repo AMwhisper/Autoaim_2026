@@ -9,7 +9,8 @@ setup(
         'opencv-python',
         'flask',
         'numpy',
-        'Pillow'
+        'Pillow',
+        'filterpy'
     ],
     python_requires='>=3.8',
     author='AMwhisper',
