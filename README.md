@@ -191,6 +191,7 @@ Start the system:
 
 ```bash
 autoaim_start
+tmux #To run the process at startup, use tmux 
 ```
 
 Optional parameters can be used to configure:
@@ -219,7 +220,7 @@ The project supports multiple deployment formats.
 
 ### Compute
 
-* NVIDIA Jetson Orin Nano
+* NVIDIA Jetson Orin Nano 8G
 
 ### Camera
 
